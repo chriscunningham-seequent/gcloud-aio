@@ -295,6 +295,38 @@ class Storage:
 
         return data
 
+    async def compose(
+        self, bucket: str, source_object_names: list[str],
+        destination_object_name: str, *,
+        timeout: int = DEFAULT_TIMEOUT,
+        params: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        session: Optional[Session] = None,
+    ):
+        # https://cloud.google.com/storage/docs/json_api/v1/objects/compose
+        encoded_object_name = quote(destination_object_name, safe='')
+        url = f'{self._api_root_read}/{bucket}/o/{encoded_object_name}/compose'
+        headers = headers or {}
+        headers.update(await self._headers())
+        headers.update({'Content-Type': 'application/json; charset=UTF-8'})
+
+        body = {
+            'sourceObjects': [{'name': name} for name in source_object_names],
+            'destination': {'contentType': 'application/octet-stream'},
+        }
+        print(body)
+        s = AioSession(session) if session else self.session
+        resp = await s.post(
+            url,
+            headers=headers,
+            params=params or {},
+            timeout=timeout,
+            data=json.dumps(body),
+        )
+
+        data: Dict[str, Any] = await resp.json(content_type=None)
+        return data
+
     async def delete(
         self, bucket: str, object_name: str, *,
         timeout: int = DEFAULT_TIMEOUT,
@@ -483,6 +515,52 @@ class Storage:
         ) as file_object:
             contents = await file_object.read()
             return await self.upload(bucket, object_name, contents, **kwargs)
+
+    async def init_resumable_upload(
+        self, bucket: str, object_name: str,
+        content_length: int, *,
+        session: Optional[Session] = None,
+        timeout: int = 30,
+    ) -> str:
+        url = f'{self._api_root_write}/{bucket}/o'
+        headers = await self._headers()
+        headers.update(
+            {
+                'Content-Length': str(content_length),
+                'Content-Type': '',
+            }
+        )
+        return await self._initiate_upload(
+            url, object_name, {}, headers, session=session, timeout=timeout
+        )
+
+    async def resume_upload(
+        self, session_uri: str, file_data: Any, offset: int,
+        total_bytes: Optional[int], *,
+        headers: Optional[Dict[str, str]] = None,
+        session: Optional[Session] = None,
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
+        stream = self._preprocess_data(file_data)
+        content_length = self._get_stream_len(stream)
+        chunk_last_byte = offset + content_length - 1
+        total_bytes = total_bytes or chunk_last_byte
+
+        headers = headers or {}
+        headers.update(await self._headers())
+        range_string = f'bytes {offset}-{chunk_last_byte}/{total_bytes}'
+        headers.update(
+            {
+                'Content-Length': str(content_length),
+                'Content-Range': range_string,
+                'Content-Type': '',
+            }
+        )
+
+        return await self._do_upload(
+            session_uri, stream, headers=headers, session=session,
+            timeout=timeout
+        )
 
     @staticmethod
     def _get_stream_len(stream: IO[AnyStr]) -> int:
