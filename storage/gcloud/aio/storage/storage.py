@@ -314,7 +314,6 @@ class Storage:
             'sourceObjects': [{'name': name} for name in source_object_names],
             'destination': {'contentType': 'application/octet-stream'},
         }
-        print(body)
         s = AioSession(session) if session else self.session
         resp = await s.post(
             url,
